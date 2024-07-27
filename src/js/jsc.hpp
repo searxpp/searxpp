@@ -10,8 +10,6 @@ namespace lany {
 namespace js {
 class EntryPoint {
     JSContext *ctx;
-    JSValue obj_ep;
-    std::vector<JSValue> obj_list;
     void init();
 
 public:
@@ -24,10 +22,8 @@ public:
     inline JSContext *get_ctx() noexcept { return ctx; }
 
     int eval_file(const std::string_view &filename) noexcept;
-    int run() noexcept;
-    void dump_error() noexcept;
-    // internal use
-    void _add_obj(JSValue obj);
+    int loop() noexcept;
+    void dump_error(JSContext *error_ctx = nullptr) noexcept;
 };
 
 class Core {
@@ -37,10 +33,12 @@ class Core {
 public:
     Core();
     Core(JSRuntime *rt);
+    Core(const Core &) = delete;
+    Core(Core &&other);
     ~Core();
 
     int add_file(const std::string_view &filename) noexcept;
-    int run_all_files() noexcept;
+    int loop_all() noexcept;
 };
 } // namespace js
 } // namespace lany

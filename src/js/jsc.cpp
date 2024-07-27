@@ -1,9 +1,10 @@
 
 
 #include "jsc.hpp"
+// #include "macro.hpp"
 #include "module.hpp"
 
-#include <cstddef>
+#include <cassert>
 #include <filesystem>
 #include <fstream>
 
@@ -32,7 +33,7 @@ static std::string read_file(const std::string_view &filename) {
                            std::istreambuf_iterator<char>());
     spdlog::info("Read file: {}", filename);
     spdlog::debug("Read file size: {}", ret.size());
-    spdlog::debug("Read file content: {}", ret);
+    spdlog::debug("Read file content:\n{}", ret);
     return ret;
 }
 
@@ -108,8 +109,6 @@ static JSModuleDef *jsc_module_loader(JSContext *ctx, const char *module_name,
         return nullptr;
     }
 
-    // ep->_add_obj(func_val);
-
     m = static_cast<JSModuleDef *>(JS_VALUE_GET_PTR(func_val));
     JS_FreeValue(ctx, func_val);
     return m;
@@ -136,10 +135,6 @@ static JSContext *JS_NewCustomContext(JSRuntime *rt) {
 namespace lany {
 namespace js {
 
-#undef JS_MKVAL
-#define JS_MKVAL(tag, val)                                                     \
-    JSValue { JSValueUnion{val}, tag }
-
 void EntryPoint::init() {
     JS_SetModuleLoaderFunc(JS_GetRuntime(ctx), NULL, jsc_module_loader, this);
     js_std_add_helpers(ctx, 0, nullptr);
@@ -153,9 +148,6 @@ EntryPoint::EntryPoint(JSContext *ctx) : ctx(ctx) { init(); }
 EntryPoint::EntryPoint(EntryPoint &&other) {
     ctx = other.ctx;
     other.ctx = nullptr;
-    obj_list.swap(other.obj_list);
-    obj_ep = other.obj_ep;
-    other.obj_ep = JS_NULL;
 }
 EntryPoint::~EntryPoint() { JS_FreeContext(ctx); }
 
@@ -164,12 +156,11 @@ int EntryPoint::eval_file(const std::string_view &filename) noexcept {
     if (code == "")
         return -1;
 
-    int eval_flags = JS_EVAL_TYPE_MODULE;
-    // int eval_flags = JS_EVAL_FLAG_COMPILE_ONLY;
-    // if (JS_DetectModule(code.c_str(), code.size()))
-    //     eval_flags |= JS_EVAL_TYPE_MODULE;
-    // else
-    //     eval_flags |= JS_EVAL_TYPE_GLOBAL;
+    int eval_flags;
+    if (JS_DetectModule(code.c_str(), code.size()))
+        eval_flags = JS_EVAL_TYPE_MODULE;
+    else
+        eval_flags = JS_EVAL_TYPE_GLOBAL;
 
     JSValue obj =
         JS_Eval(ctx, code.c_str(), code.size(), filename.data(), eval_flags);
@@ -179,70 +170,56 @@ int EntryPoint::eval_file(const std::string_view &filename) noexcept {
         return -1;
     }
 
-    // if (js_set_import_meta(ctx, obj, true) < 0) {
-    //     JS_FreeValue(ctx, obj);
-    //     dump_error();
-    //     return -1;
-    // }
-
-    obj_ep = obj;
     return 0;
 }
 
-int EntryPoint::run() noexcept {
-    // if (JS_IsNull(obj_ep)) {
-    //     spdlog::error("EntryPoint::run() can't be run twice");
-    //     return -1;
-    // }
-    // for (auto &obj : obj_list) {
-    //     JSValue ret = JS_EvalFunction(ctx, obj);
-    //     if (JS_IsException(ret)) {
-    //         dump_error();
-    //         return -1;
-    //     }
-    // }
-    // JSValue obj = JS_EvalFunction(ctx, obj_ep);
-    // if (JS_IsException(obj)) {
-    //     dump_error();
-    //     return -1;
-    // }
-    // obj_ep = JS_NULL;
-    // JS_FreeValue(ctx, obj);
-    js_std_loop(ctx);
+int EntryPoint::loop() noexcept {
+    while (true) {
+        JSContext *ctx1;
+        int err = JS_ExecutePendingJob(JS_GetRuntime(ctx), &ctx1);
+        if (err <= 0) {
+            if (err < 0)
+                dump_error(ctx1);
+            break;
+        }
+    }
     return 0;
 }
 
-void EntryPoint::dump_error() noexcept {
-    JSValue exn = JS_GetException(ctx);
-    std::string_view err = JS_ToCString(ctx, exn);
+void EntryPoint::dump_error(JSContext *error_ctx) noexcept {
+    if (!error_ctx)
+        error_ctx = ctx;
+    JSValue exn = JS_GetException(error_ctx);
+    std::string_view err = JS_ToCString(error_ctx, exn);
     if (err.empty())
         dp_logger.error("unknown exception");
     else
         dp_logger.error("{}", err);
-    if (JS_IsError(ctx, exn)) {
-        JSValue val = JS_GetPropertyStr(ctx, exn, "stack");
+    if (JS_IsError(error_ctx, exn)) {
+        JSValue val = JS_GetPropertyStr(error_ctx, exn, "stack");
         if (!JS_IsUndefined(val)) {
-            std::string_view stack = JS_ToCString(ctx, val);
+            std::string_view stack = JS_ToCString(error_ctx, val);
             if (!stack.empty())
                 dp_logger.error("JS stack: {}", stack);
-            JS_FreeCString(ctx, stack.data());
+            JS_FreeCString(error_ctx, stack.data());
         }
-        JS_FreeValue(ctx, val);
+        JS_FreeValue(error_ctx, val);
     }
-    JS_FreeCString(ctx, err.data());
-    JS_FreeValue(ctx, exn);
+    JS_FreeCString(error_ctx, err.data());
+    JS_FreeValue(error_ctx, exn);
 }
 
-void EntryPoint::_add_obj(JSValue obj) { obj_list.emplace_back(obj); }
-
-Core::Core() {
-    rt = JS_NewRuntime();
-    js_std_init_handlers(rt);
-}
+Core::Core() { rt = JS_NewRuntime(); }
 Core::Core(JSRuntime *rt) : rt(rt) {}
+Core::Core(Core &&other) {
+    rt = other.rt;
+    other.rt = nullptr;
+    ep_list.swap(other.ep_list);
+}
 Core::~Core() { JS_FreeRuntime(rt); }
 
 int Core::add_file(const std::string_view &filename) noexcept {
+    assert(rt != nullptr && "JSRuntime is nullptr");
     auto ep = EntryPoint(rt);
     if (!ep.eval_file(filename)) {
         return -1;
@@ -250,10 +227,10 @@ int Core::add_file(const std::string_view &filename) noexcept {
     ep_list.emplace_back(std::move(ep));
     return 0;
 }
-int Core::run_all_files() noexcept {
+int Core::loop_all() noexcept {
     int ret = 0;
     for (auto &ep : ep_list) {
-        if (!ep.run())
+        if (!ep.loop())
             ret = -1;
     }
     return ret;
